@@ -1,4 +1,4 @@
-# app.py (최종 - 실제 API 키 및 구조 반영)
+# app.py (최종 - 버그 방지 로직 및 실제 API 정보 반영)
 
 import streamlit as st
 import pandas as pd
@@ -6,7 +6,7 @@ import numpy as np
 import time
 import requests
 import random 
-import json # JSON 응답 처리 명확화를 위해 추가
+import json 
 
 # -----------------------------------------------------
 # 1. 페이지 설정 및 제목
@@ -27,16 +27,16 @@ st.markdown("""
 # -----------------------------------------------------
 
 # 📌 1. API 엔드포인트: 명세서 기반으로 정확히 구성
-# Host + Base Path + Endpoint
 API_ENDPOINT = "https://api.odcloud.kr/api/15150101/v1/uddi:1ddc788e-fdd8-4255-9e6d-a8f260dc20db" 
 
 # 📌 2. 실제 발급받은 인증키 적용
-SERVICE_KEY = "6d3fcec1cb59910225aa7de9c79def31b2102379f73dc40baa7130a7fac4c1e3" 
+SERVICE_KEY = "6d3fcec1cb59910225aa7de9c79def31b2102379f73dc40baa7130a8fac4c1e3" 
 
 # -----------------------------------------------------
 # 시뮬레이션 데이터 함수 (API 호출 실패 시 대비)
 # -----------------------------------------------------
 def simulate_api_data():
+    """API 호출 실패 시 임시로 사용할 가상 주차장 데이터 생성."""
     base_lat = 37.5665; base_lon = 126.9780; num_spots = 100 
     df = pd.DataFrame({
         'lat': np.random.randn(num_spots) * 0.005 + base_lat,
@@ -52,18 +52,18 @@ def simulate_api_data():
 def fetch_parking_data_from_api():
     """실제 공공데이터 API를 호출하여 주차장 데이터를 가져옵니다."""
     
-    # 🌟 API 요청에 필요한 파라미터 정의 (명세서의 Query Parameter 반영)
+    # 🌟 API 요청에 필요한 파라미터 정의 (400 오류 해결을 위해 명세서와 1:1 일치 확인)
     params = {
         'serviceKey': SERVICE_KEY,
         'page': '1',
-        'perPage': '100',          # 한 번에 가져올 데이터 수 (최대 100개)
-        'returnType': 'JSON'       # JSON 형식 요청
+        'perPage': '100',
+        'returnType': 'JSON' 
     }
     
     try:
-        # 1. 실제 API에 GET 요청 (timeout 설정으로 안정성 확보)
+        # 1. 실제 API에 GET 요청
         response = requests.get(API_ENDPOINT, params=params, timeout=10)
-        response.raise_for_status() # HTTP 오류(4xx, 5xx) 발생 시 예외 발생
+        response.raise_for_status() # 400 Bad Request 발생 시 여기서 예외 처리
         
         # 2. JSON 데이터 파싱
         json_data = response.json()
@@ -72,29 +72,56 @@ def fetch_parking_data_from_api():
         data_list = json_data.get('data', [])
 
         if not data_list:
-             st.warning("API에서 유효한 데이터를 가져오지 못했습니다. 시뮬레이션 데이터를 사용합니다.")
+             st.warning("API 응답에 데이터가 없습니다. 시뮬레이션 데이터를 사용합니다.")
              return simulate_api_data()
              
         parking_df = pd.DataFrame(data_list)
         
-        # 4. 데이터프레임 컬럼 정리 및 타입 변환
-        # 잔여석 및 총구획수를 정수형으로 변환
-        for col in ['총잔여주차구획수', '총주차구획수']:
-             # API 명세서에 따르면 이 필드는 정수형이므로, 변환을 시도합니다.
+        # 4. 데이터프레임 컬럼 정리 및 타입 변환 (명세서 필드명 사용)
+        
+        # 잔여석 및 총구획수 변환
+        for col in ['총잔여주차구획수', '총주차구획수', '주차혼잡상태']:
             parking_df[col] = pd.to_numeric(parking_df.get(col, 0), errors='coerce').fillna(0).astype(int)
         
-        # ⚠️ 공공 API 응답에는 위도(lat)와 경도(lon) 필드가 직접 포함되어 있지 않을 수 있습니다. 
-        # (별도의 API를 통해 주소로 좌표를 변환해야 할 수 있음)
-        # 현재는 지도 시각화를 위해 'lat'과 'lon' 컬럼이 이미 있다고 가정하거나 시뮬레이션 데이터에 의존합니다.
-        
-        # 주차 혼잡 상태를 문자열로 매핑하여 보여줄 수 있음
+        # 주차 혼잡 상태 텍스트 매핑
         status_map = {0: '여유', 1: '보통', 2: '혼잡', 3: '만차'}
-        parking_df['주차혼잡상태_텍스트'] = parking_df['주차혼잡상태'].map(status_map)
+        parking_df['주차혼잡상태_텍스트'] = parking_df['주차혼잡상태'].map(status_map).fillna('알 수 없음')
 
+        # ⭐️⭐️⭐️ [지도 시각화 안정성 강화 로직] ⭐️⭐️⭐️
+        # API에 위도/경도 필드가 직접 없는 경우를 대비해, 잠재적인 필드명을 'lat'/'lon'으로 변환 시도
+        
+        # 1) 일반적인 공공 API 좌표 필드명으로 변환 시도
+        coordinate_mapping = {
+            'PRK_LTTD': 'lat',      # 주차장 위도 (예시)
+            'PRK_LGTT': 'lon',      # 주차장 경도 (예시)
+            'lat': 'lat',           # 이미 lat/lon인 경우
+            'lon': 'lon'
+        }
+        
+        # 컬럼 이름 변경 및 숫자형 변환 시도
+        renamed_cols = {}
+        for api_col, df_col in coordinate_mapping.items():
+            if api_col in parking_df.columns:
+                renamed_cols[api_col] = df_col
+                
+        parking_df = parking_df.rename(columns=renamed_cols)
+
+        # 2) 위도/경도 필드가 있으면 숫자형으로 변환
+        if 'lat' in parking_df.columns and 'lon' in parking_df.columns:
+            parking_df['lat'] = pd.to_numeric(parking_df['lat'], errors='coerce')
+            parking_df['lon'] = pd.to_numeric(parking_df['lon'], errors='coerce')
+        else:
+             # 3) 위도/경도 컬럼이 전혀 없으면 시뮬레이션 데이터를 사용하여 채움
+            st.warning("위도/경도 정보가 없어 지도 시각화에 제약이 있습니다. 임시 좌표를 사용합니다.")
+            sim_df = simulate_api_data()
+            parking_df['lat'] = sim_df['lat']
+            parking_df['lon'] = sim_df['lon']
+            
         return parking_df
         
     except requests.exceptions.RequestException as e:
-        st.error(f"API 호출 실패 (네트워크/서버 오류): {e}")
+        # 400 Bad Request를 포함한 모든 요청 오류 처리
+        st.error(f"API 호출 실패 (네트워크/서버 오류): {e}. API 키, 엔드포인트, 파라미터 구성을 다시 확인하십시오.")
         return simulate_api_data() 
     
     except Exception as e:
@@ -111,12 +138,12 @@ realtime_container = st.empty()
 while True:
     with realtime_container.container():
         
-        # 1. 데이터 가져오기 (실제 API 호출)
+        # 1. 데이터 가져오기 (실제 API 호출 시도)
         parking_df = fetch_parking_data_from_api()
         
         if parking_df is not None and not parking_df.empty:
             
-            # 2. 현황 계산 (명세서의 필드명 사용)
+            # 2. 현황 계산
             total_parking_lots = len(parking_df)
             total_available_spots = parking_df['총잔여주차구획수'].sum()
             total_max_spots = parking_df['총주차구획수'].sum()
@@ -135,22 +162,23 @@ while True:
                     label="✅ 실시간 빈자리 수 (합산)", 
                     value=f"{total_available_spots}개",
                     delta_color="normal",
-                    delta=f"혼잡도: {parking_df['주차혼잡상태_텍스트'].mode().iloc[0] if '주차혼잡상태_텍스트' in parking_df.columns else '알 수 없음'}"
+                    # 최빈값(mode)을 사용하여 대표 혼잡도 표시
+                    delta=f"혼잡도: {parking_df['주차혼잡상태_텍스트'].mode().iloc[0]}"
                 )
 
             # 텍스트 알림
             st.header(f"🚗 고객님! 현재 조회된 주차장의 총 잔여석은 **{total_available_spots}**개 입니다! 🥳")
 
-            # 4. 지도 시각화 업데이트 (위도/경도 데이터의 존재 여부에 따라 시각화)
+            # 4. 지도 시각화 업데이트 
             st.subheader("📍 주차장 위치 시각화")
             
-            # ⚠️ 위도/경도 컬럼명이 실제 API에 있는지 확인 후 시각화
-            # 현재는 필드가 없다고 가정하고 시뮬레이션 데이터의 lat/lon을 사용하여 지도 표시
+            # lat/lon이 유효한 행만 추출
+            map_data = parking_df.dropna(subset=['lat', 'lon'])
             
-            if 'lat' in parking_df.columns and 'lon' in parking_df.columns and not parking_df.dropna(subset=['lat', 'lon']).empty:
-                st.map(parking_df.dropna(subset=['lat', 'lon']), latitude='lat', longitude='lon', size=15)
+            if not map_data.empty:
+                st.map(map_data, latitude='lat', longitude='lon', size=15)
             else:
-                 st.warning("지도 시각화에 필요한 위도/경도 데이터가 현재 API 응답에 없습니다. (주소 변환 API 필요)")
+                 st.warning("지도 시각화에 필요한 유효한 위도/경도 데이터가 없어 지도를 표시할 수 없습니다.")
 
             # 5. 사용자 위치 기반 안내 (다음 단계 구현 예정)
             st.subheader("🔍 가까운 빈자리 안내 (다음 단계 기능)")
