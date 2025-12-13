@@ -1,4 +1,4 @@
-# app.py (최종 - 성능 최적화 및 KeyError 해결)
+# app.py (최종 - NameError 해결 및 최적화 완료)
 
 import streamlit as st
 import pandas as pd
@@ -9,13 +9,40 @@ import random
 import json 
 import math 
 
-# ... (생략: 1. 페이지 설정 및 2. API 설정, 3. 거리 계산 함수)
+# -----------------------------------------------------
+# 1. 페이지 설정 및 제목
+# -----------------------------------------------------
+st.set_page_config(
+    page_title="🅿️ 주차장 실시간 정보 - 공공 데이터 연동",
+    layout="wide"
+)
+
+st.title("🅿️ 스마트 주차 안내 시스템: 공공 주차장 실시간 확인!")
+st.markdown("""
+이 앱은 한국교통안전공단 주차장 실시간 정보 API와 연동된 구조로 작동하며, **운전자 위치 기반 최단 거리 안내**를 제공합니다.
+---
+""")
+
+# -----------------------------------------------------
+# 2. API 엔드포인트 및 키 설정 (전역 변수 정의)
+# -----------------------------------------------------
+
+API_ENDPOINT = "https://api.odcloud.kr/api/15150101/v1/uddi:1ddc788e-fdd8-4255-9e6d-a8f260dc20db" 
+SERVICE_KEY = "6d3fcec1cb59910225aa7de9c79def31b2102379f73dc40baa7130a8fac4c1e3" 
+
+# -----------------------------------------------------
+# 3. 거리 계산 함수 정의
+# -----------------------------------------------------
+
+def calculate_distance(lat1, lon1, lat2, lon2):
+    """유클리드 거리를 계산합니다. (근사치, 거리 비교용으로 적합)"""
+    return math.sqrt((lat2 - lat1)**2 + (lon2 - lon1)**2)
+
 
 # -----------------------------------------------------
 # 4. 시뮬레이션 및 API 데이터 로드 함수 (st.cache_data 적용)
 # -----------------------------------------------------
 def simulate_api_data():
-    # ... (내용 동일)
     base_lat = 37.5665; base_lon = 126.9780; num_spots = 100 
     df = pd.DataFrame({
         'lat': np.random.randn(num_spots) * 0.005 + base_lat,
@@ -29,46 +56,77 @@ def simulate_api_data():
 
 @st.cache_data(ttl=300) # 300초(5분)마다 API 데이터를 새로 가져옴
 def fetch_parking_data_from_api():
-    # ... (내용 동일)
+    
+    # ⭐️ NameError 해결: SERVICE_KEY와 API_ENDPOINT가 전역 변수임을 명시 ⭐️
+    global SERVICE_KEY, API_ENDPOINT
+    
     params = {
         'serviceKey': SERVICE_KEY, 'page': '1', 'perPage': '100', 'returnType': 'JSON' 
     }
     
     try:
-        # ... (API 호출 및 데이터 처리 로직은 동일)
-        # ...
-        
+        response = requests.get(API_ENDPOINT, params=params, timeout=10)
+        response.raise_for_status()
+        json_data = response.json()
+        data_list = json_data.get('data', [])
+
+        if not data_list:
+             st.warning("API 응답에 데이터가 없습니다. 시뮬레이션 데이터를 사용합니다.")
+             return simulate_api_data()
+             
         parking_df = pd.DataFrame(data_list)
         
-        # ... (컬럼 정리 및 타입 변환 로직은 동일)
+        # 4. 데이터프레임 컬럼 정리 및 타입 변환
+        for col in ['총잔여주차구획수', '총주차구획수', '주차혼잡상태']:
+            parking_df[col] = pd.to_numeric(parking_df.get(col, 0), errors='coerce').fillna(0).astype(int)
         
-        # ... (주차장명 KeyError 방지 로직은 동일)
-        
-        # ... (위도/경도 안정성 강화 로직은 동일)
+        status_map = {0: '여유', 1: '보통', 2: '혼잡', 3: '만차'}
+        parking_df['주차혼잡상태_텍스트'] = parking_df['주차혼잡상태'].map(status_map).fillna('알 수 없음')
+
+        # 주차장명 KeyError 방지 로직 (이전과 동일)
+        if '주차장명' not in parking_df.columns:
+             if 'PRK_NAME' in parking_df.columns:
+                 parking_df = parking_df.rename(columns={'PRK_NAME': '주차장명'})
+             elif '주차장관리번호' in parking_df.columns:
+                 parking_df = parking_df.rename(columns={'주차장관리번호': '주차장명'})
+             else:
+                 parking_df['주차장명'] = parking_df.index.to_series().apply(lambda x: f'주차장-{x+1:02d}')
+
+
+        # 지도 시각화 안정성 강화 로직 (이전과 동일)
+        coordinate_mapping = {'PRK_LTTD': 'lat', 'PRK_LGTT': 'lon', 'lat': 'lat', 'lon': 'lon'}
+        renamed_cols = {api_col: df_col for api_col, df_col in coordinate_mapping.items() if api_col in parking_df.columns}
+        parking_df = parking_df.rename(columns=renamed_cols)
+
+        if 'lat' in parking_df.columns and 'lon' in parking_df.columns:
+            parking_df['lat'] = pd.to_numeric(parking_df['lat'], errors='coerce')
+            parking_df['lon'] = pd.to_numeric(parking_df['lon'], errors='coerce')
+        else:
+            sim_df = simulate_api_data()
+            parking_df['lat'] = sim_df['lat']
+            parking_df['lon'] = sim_df['lon']
             
         return parking_df
         
     except requests.exceptions.RequestException as e:
-        # ... (오류 처리 로직은 동일)
         st.error(f"API 호출 실패 (네트워크/서버 오류): {e}. 시뮬레이션 데이터를 사용합니다.")
         return simulate_api_data() 
     
     except Exception as e:
-        # ... (오류 처리 로직은 동일)
         st.error(f"데이터 처리 오류: {e}")
         return simulate_api_data()
 # -----------------------------------------------------
 
 
 # -----------------------------------------------------
-# 5. 메인 앱 실행 영역 (while True 루프 제거)
+# 5. 메인 앱 실행 영역 (루프 제거, 캐싱 적용)
 # -----------------------------------------------------
 
-# 초기 사용자 위치 설정 (이전과 동일)
+# 초기 사용자 위치 설정
 default_lat = 37.5665
 default_lon = 126.9780
 
-# 사이드바에 사용자 위치 입력 UI 배치 (이전과 동일)
+# 사이드바에 사용자 위치 입력 UI 배치
 with st.sidebar:
     st.header("나의 위치 설정 🗺️")
     st.markdown("차량의 현재 위도와 경도를 입력하세요.")
@@ -90,10 +148,11 @@ with st.sidebar:
 
 # 1. 데이터 가져오기 (캐싱된 함수 호출)
 parking_df = fetch_parking_data_from_api()
+# 
 
 if parking_df is not None and not parking_df.empty:
     
-    # 2. 현황 계산 및 메트릭 표시 (이전과 동일)
+    # 2. 현황 계산 및 메트릭 표시
     total_parking_lots = len(parking_df)
     total_available_spots = parking_df['총잔여주차구획수'].sum()
     total_max_spots = parking_df['총주차구획수'].sum()
@@ -110,12 +169,12 @@ if parking_df is not None and not parking_df.empty:
     st.header(f"🚗 고객님! 현재 조회된 주차장의 총 잔여석은 **{total_available_spots}**개 입니다! 🥳")
 
     # -----------------------------------------------------
-    # ⭐️⭐️⭐️ 6. 최단 거리 안내 로직 ⭐️⭐️⭐️ (이전과 동일)
+    # 6. 최단 거리 안내 로직
     # -----------------------------------------------------
     
     st.subheader("📍 내 위치 기반 최단 거리 안내")
     
-    # 1. 빈 주차장만 필터링 (잔여석이 1개 이상인 경우)
+    # 1. 빈 주차장만 필터링
     available_spots_df = parking_df[parking_df['총잔여주차구획수'] > 0].copy()
 
     if available_spots_df.empty:
@@ -170,5 +229,3 @@ if parking_df is not None and not parking_df.empty:
 
 else:
     st.error("주차장 데이터를 불러오는 데 실패했습니다. 잠시 후 다시 시도해 주세요.")
-
-# Streamlit은 이 지점에서 종료되고, 사용자 상호 작용 시 재실행됩니다.
